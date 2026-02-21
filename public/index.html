@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Multiplayer World</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #1a1e2c; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #chat { position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; width: 300px; height: 200px; overflow-y: scroll; }
+        #input { position: fixed; bottom: 220px; left: 10px; width: 300px; padding: 5px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="chat"></div>
+    <input id="input" placeholder="Chat...">
+
+    <script>
+        const socket = io();
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const chatDiv = document.getElementById('chat');
+        const input = document.getElementById('input');
+
+        let player = { x: 0, y: 0, name: 'Player' + Math.floor(Math.random() * 1000) };
+        let world = [];
+        let players = {};
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            let camX = player.x - canvas.width / 2;
+            let camY = player.y - canvas.height / 2;
+
+            // Grid
+            ctx.fillStyle = '#3a4055';
+            for (let i = Math.floor(camX / 40) * 40; i < camX + canvas.width; i += 40) {
+                for (let j = Math.floor(camY / 40) * 40; j < camY + canvas.height; j += 40) {
+                    ctx.beginPath();
+                    ctx.arc(i - camX, j - camY, 2, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+
+            // Blocks
+            for (let x = Math.max(0, Math.floor(camX / 40)); x < Math.min(256, Math.ceil((camX + canvas.width) / 40)); x++) {
+                for (let y = Math.max(0, Math.floor(camY / 40)); y < Math.min(256, Math.ceil((camY + canvas.height) / 40)); y++) {
+                    if (world[x] && world[x][y] && world[x][y] !== 0) {
+                        ctx.fillStyle = '#8B5A2B';
+                        ctx.fillRect(x * 40 - camX, y * 40 - camY, 38, 38);
+                    }
+                }
+            }
+
+            // Other players
+            for (let id in players) {
+                if (id !== socket.id) {
+                    let p = players[id];
+                    ctx.fillStyle = '#FF5555';
+                    ctx.beginPath();
+                    ctx.arc(p.x - camX, p.y - camY, 10, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+
+            // Current player
+            ctx.fillStyle = '#55FF55';
+            ctx.beginPath();
+            ctx.arc(canvas.width / 2, canvas.height / 2, 10, 0, 2 * Math.PI);
+            ctx.fill();
+
+            requestAnimationFrame(draw);
+        }
+
+        socket.on('init', (data) => {
+            world = data.world;
+            players = data.players;
+        });
+
+        socket.on('playerMoved', (data) => {
+            players[data.id] = { x: data.x, y: data.y, name: data.name };
+        });
+
+        socket.on('playerLeft', (id) => {
+            delete players[id];
+        });
+
+        socket.on('blockUpdated', (data) => {
+            if (!world[data.x]) world[data.x] = [];
+            world[data.x][data.y] = data.blockType;
+        });
+
+        socket.on('chat', (msg) => {
+            chatDiv.innerHTML += `<div>${msg}</div>`;
+            chatDiv.scrollTop = chatDiv.scrollHeight;
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.target === input) return;
+            
+            let dx = 0, dy = 0;
+            switch(e.key) {
+                case 'ArrowUp': dy = -10; break;
+                case 'ArrowDown': dy = 10; break;
+                case 'ArrowLeft': dx = -10; break;
+                case 'ArrowRight': dx = 10; break;
+            }
+            
+            if (dx !== 0 || dy !== 0) {
+                e.preventDefault();
+                player.x += dx;
+                player.y += dy;
+                socket.emit('move', { x: player.x, y: player.y, name: player.name });
+            }
+        });
+
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && input.value.trim()) {
+                socket.emit('chat', input.value);
+                input.value = '';
+            }
+        });
+
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            let worldX = Math.floor((x + player.x - canvas.width / 2) / 40);
+            let worldY = Math.floor((y + player.y - canvas.height / 2) / 40);
+            
+            if (worldX >= 0 && worldX < 256 && worldY >= 0 && worldY < 256) {
+                socket.emit('setBlock', { x: worldX, y: worldY, blockType: 1 });
+            }
+        });
+
+        socket.emit('move', { x: player.x, y: player.y, name: player.name });
+        draw();
+    </script>
+</body>
+</html>
