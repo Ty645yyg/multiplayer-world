@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MyGame — одиночный / мультиплеер</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; }
+        body { background: #1a1e2c; display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: 'Segoe UI', sans-serif; padding: 5px; }
+        .game-container { background: #0b0d17; border-radius: 20px; padding: 10px; width: 100%; max-width: 600px; display: flex; flex-direction: column; }
+        .canvas-wrapper { width: 100%; aspect-ratio: 1/1; background: #141824; border-radius: 15px; overflow: hidden; touch-action: none; }
+        canvas { width: 100%; height: 100%; display: block; background: #141824; }
+        .panel { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+        .mode-selector { display: flex; gap: 5px; margin-bottom: 5px; }
+        .mode-btn { flex: 1; padding: 12px; border: none; border-radius: 30px; font-weight: bold; font-size: 16px; background: #2f354a; color: white; border: 1px solid #4a516b; }
+        .mode-btn.active { background: #5b9e7a; border-color: #8bc34a; }
+        .move-buttons { display: flex; gap: 5px; justify-content: center; }
+        .move-btn { background: #2f354a; border: none; color: white; font-size: 24px; padding: 15px 20px; border-radius: 50px; flex: 1; box-shadow: 0 5px 0 #0b0d17; border: 1px solid #4a516b; touch-action: manipulation; }
+        .move-btn:active { transform: translateY(4px); box-shadow: none; }
+        .server-url-area { display: flex; gap: 5px; margin: 5px 0; }
+        #serverUrl { flex: 1; background: #0f121c; border: 2px solid #3d445e; color: white; padding: 10px; border-radius: 30px; font-size: 14px; }
+        .chat-area { display: flex; gap: 5px; }
+        #chatInput { flex: 1; background: #0f121c; border: 2px solid #3d445e; color: white; padding: 12px 15px; border-radius: 30px; font-size: 16px; }
+        #sendBtn { background: #4a6fa5; border: none; color: white; padding: 12px 20px; border-radius: 30px; font-weight: bold; }
+        #chatMessages { background: #1f2332; border-radius: 15px; padding: 10px; height: 100px; overflow-y: auto; color: #b7c0e0; font-size: 14px; }
+        #status { color: #7e89b3; text-align: center; font-size: 14px; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="canvas-wrapper" id="wrapper">
+            <canvas id="gameCanvas"></canvas>
+        </div>
+        
+        <div class="panel">
+            <!-- Выбор режима -->
+            <div class="mode-selector">
+                <button class="mode-btn active" id="modeSingle">👤 Одиночный</button>
+                <button class="mode-btn" id="modeMulti">👥 Мультиплеер</button>
+            </div>
+            
+            <!-- Поле для URL сервера (только для мультиплеера) -->
+            <div class="server-url-area" id="serverUrlArea" style="display: none;">
+                <input type="text" id="serverUrl" placeholder="URL сервера (например: https://mygame.onrender.com)">
+                <button id="connectBtn">🔌</button>
+            </div>
+            
+            <!-- Кнопки движения -->
+            <div class="move-buttons">
+                <button class="move-btn" id="moveUp">⬆️</button>
+                <button class="move-btn" id="moveDown">⬇️</button>
+                <button class="move-btn" id="moveLeft">⬅️</button>
+                <button class="move-btn" id="moveRight">➡️</button>
+            </div>
+            
+            <!-- Чат -->
+            <div id="chatMessages"></div>
+            
+            <div class="chat-area">
+                <input type="text" id="chatInput" placeholder="Чат...">
+                <button id="sendBtn">➤</button>
+            </div>
+            
+            <!-- Статус -->
+            <div id="status">🟢 Одиночный режим</div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== НАСТРОЙКИ ====================
+        const canvas = document.getElementById('gameCanvas');
+        const wrapper = document.getElementById('wrapper');
+        const ctx = canvas.getContext('2d');
+        
+        let gameMode = 'single'; // 'single' или 'multi'
+        let socket = null;
+        let playerId = 'single_' + Math.random().toString(36).substr(2, 9);
+        
+        // Игрок
+        let player = {
+            x: 0,
+            y: 0,
+            name: 'Игрок' + Math.floor(Math.random() * 1000)
+        };
+        
+        let players = {};
+        let world = [];
+        const WORLD_SIZE = 256;
+        
+        // Инициализация мира
+        for (let i = 0; i < WORLD_SIZE; i++) {
+            world[i] = [];
+            for (let j = 0; j < WORLD_SIZE; j++) {
+                world[i][j] = 0;
+            }
+        }
+        
+        // Добавим немного земли для красоты
+        for (let i = 100; i < 120; i++) {
+            for (let j = 100; j < 120; j++) {
+                world[i][j] = 1;
+            }
+        }
+        
+        // ==================== РАЗМЕР ХОЛСТА ====================
+        function resizeCanvas() {
+            const rect = wrapper.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            draw();
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+        
+        // ==================== ОТРИСОВКА ====================
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            let camX = player.x - canvas.width / 2;
+            let camY = player.y - canvas.height / 2;
+            
+            // Пупырышки
+            ctx.fillStyle = '#3a4055';
+            for (let i = Math.floor(camX / 40) * 40; i < camX + canvas.width; i += 40) {
+                for (let j = Math.floor(camY / 40) * 40; j < camY + canvas.height; j += 40) {
+                    ctx.beginPath();
+                    ctx.arc(i - camX, j - camY, 2, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+            
+            // Блоки
+            for (let x = Math.max(0, Math.floor(camX / 40)); x < Math.min(WORLD_SIZE, Math.ceil((camX + canvas.width) / 40)); x++) {
+                for (let y = Math.max(0, Math.floor(camY / 40)); y < Math.min(WORLD_SIZE, Math.ceil((camY + canvas.height) / 40)); y++) {
+                    if (world[x] && world[x][y] && world[x][y] !== 0) {
+                        ctx.fillStyle = '#8B5A2B';
+                        ctx.fillRect(x * 40 - camX, y * 40 - camY, 38, 38);
+                    }
+                }
+            }
+            
+            // Другие игроки (только в мультиплеере)
+            if (gameMode === 'multi' && socket) {
+                for (let id in players) {
+                    if (id !== socket.id && id !== playerId) {
+                        let p = players[id];
+                        ctx.fillStyle = '#FF5555';
+                        ctx.beginPath();
+                        ctx.arc(p.x - camX, p.y - camY, 15, 0, 2 * Math.PI);
+                        ctx.fill();
+                        ctx.fillStyle = 'white';
+                        ctx.font = '14px Arial';
+                        ctx.fillText(p.name || '?', p.x - camX - 20, p.y - camY - 20);
+                    }
+                }
+            }
+            
+            // Текущий игрок
+            ctx.fillStyle = '#55FF55';
+            ctx.beginPath();
+            ctx.arc(canvas.width / 2, canvas.height / 2, 15, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.fillStyle = 'white';
+            ctx.font = '14px Arial';
+            ctx.fillText(player.name, canvas.width / 2 - 30, canvas.height / 2 - 30);
+        }
+        
+        // ==================== ДВИЖЕНИЕ ====================
+        function move(dx, dy) {
+            player.x += dx;
+            player.y += dy;
+            
+            if (gameMode === 'multi' && socket && socket.connected) {
+                socket.emit('move', player);
+            }
+            
+            draw();
+        }
+        
+        // Кнопки движения
+        document.getElementById('moveUp').addEventListener('click', () => move(0, -40));
+        document.getElementById('moveDown').addEventListener('click', () => move(0, 40));
+        document.getElementById('moveLeft').addEventListener('click', () => move(-40, 0));
+        document.getElementById('moveRight').addEventListener('click', () => move(40, 0));
+        
+        // Клавиатура
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT') return;
+            
+            switch(e.key) {
+                case 'ArrowUp': case 'w': case 'W':
+                    move(0, -40);
+                    e.preventDefault();
+                    break;
+                case 'ArrowDown': case 's': case 'S':
+                    move(0, 40);
+                    e.preventDefault();
+                    break;
+                case 'ArrowLeft': case 'a': case 'A':
+                    move(-40, 0);
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight': case 'd': case 'D':
+                    move(40, 0);
+                    e.preventDefault();
+                    break;
+            }
+        });
+        
+        // ==================== УСТАНОВКА БЛОКОВ ====================
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            let worldX = Math.floor((x + player.x - canvas.width / 2) / 40);
+            let worldY = Math.floor((y + player.y - canvas.height / 2) / 40);
+            
+            if (worldX >= 0 && worldX < WORLD_SIZE && worldY >= 0 && worldY < WORLD_SIZE) {
+                world[worldX][worldY] = 1;
+                
+                if (gameMode === 'multi' && socket && socket.connected) {
+                    socket.emit('setBlock', { x: worldX, y: worldY, blockType: 1 });
+                }
+                
+                draw();
+            }
+        });
+        
+        // ==================== ЧАТ ====================
+        document.getElementById('sendBtn').addEventListener('click', () => {
+            const input = document.getElementById('chatInput');
+            const msg = input.value.trim();
+            
+            if (!msg) return;
+            
+            if (gameMode === 'multi' && socket && socket.connected) {
+                socket.emit('chat', msg);
+                addChatMessage(`👤 ${player.name}: ${msg}`);
+            } else {
+                addChatMessage(`💬 [Одиночный режим] ${msg}`);
+            }
+            
+            input.value = '';
+        });
+        
+        document.getElementById('chatInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('sendBtn').click();
+            }
+        });
+        
+        function addChatMessage(text) {
+            const chatDiv = document.getElementById('chatMessages');
+            chatDiv.innerHTML += `<div>${text}</div>`;
+            chatDiv.scrollTop = chatDiv.scrollHeight;
+        }
+        
+        // ==================== ПЕРЕКЛЮЧЕНИЕ РЕЖИМОВ ====================
+        document.getElementById('modeSingle').addEventListener('click', () => {
+            gameMode = 'single';
+            document.getElementById('modeSingle').classList.add('active');
+            document.getElementById('modeMulti').classList.remove('active');
+            document.getElementById('serverUrlArea').style.display = 'none';
+            document.getElementById('status').innerHTML = '🟢 Одиночный режим';
+            
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+            
+            players = {};
+            draw();
+        });
+        
+        document.getElementById('modeMulti').addEventListener('click', () => {
+            gameMode = 'multi';
+            document.getElementById('modeMulti').classList.add('active');
+            document.getElementById('modeSingle').classList.remove('active');
+            document.getElementById('serverUrlArea').style.display = 'flex';
+            document.getElementById('status').innerHTML = '🟡 Введите URL сервера';
+        });
+        
+        // Подключение к серверу
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            let serverUrl = document.getElementById('serverUrl').value.trim();
+            
+            if (!serverUrl) {
+                // Сервер по умолчанию (если ничего не ввели)
+                serverUrl = 'https://mygame.onrender.com';
+            }
+            
+            document.getElementById('status').innerHTML = '🔵 Подключение...';
+            
+            if (socket) {
+                socket.disconnect();
+            }
+            
+            socket = io(serverUrl);
+            
+            socket.on('connect', () => {
+                document.getElementById('status').innerHTML = '🟢 В мультиплеере';
+                socket.emit('move', player);
+            });
+            
+            socket.on('init', (data) => {
+                world = data.world;
+                players = data.players;
+                draw();
+            });
+            
+            socket.on('playerMoved', (data) => {
+                players[data.id] = { x: data.x, y: data.y, name: data.name };
+                draw();
+            });
+            
+            socket.on('playerLeft', (id) => {
+                delete players[id];
+                draw();
+            });
+            
+            socket.on('blockUpdated', (data) => {
+                if (!world[data.x]) world[data.x] = [];
+                world[data.x][data.y] = data.blockType;
+                draw();
+            });
+            
+            socket.on('chat', (msg) => {
+                addChatMessage(msg);
+            });
+            
+            socket.on('disconnect', () => {
+                document.getElementById('status').innerHTML = '🔴 Отключён';
+            });
+        });
+        
+        // ==================== СТАРТ ====================
+        draw();
+    </script>
+</body>
+</html>
